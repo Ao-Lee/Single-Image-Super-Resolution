@@ -1,35 +1,11 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import cv2
-# from keras.applications.mobilenet_v2 import preprocess_input
-
-# [0, 255] -> [-1, 1]
-def Preprocess(batch):
-    return batch / 127.5 - 1. 
 
 def InvertedProcess(batch):
     b = (batch + 1.) * 127.5
     return b.astype(np.uint8)
 
-def SetColor(img, mask, color):
-    mask_full = np.stack([mask, mask, mask], axis=-1)
-    new_img = np.where(mask_full, color, img)
-    return new_img
-
-def ShowBinaryImg(img, title='', figsize=(20,20), save_path=None):
-    plt.figure(figsize=figsize)
-    plt.imshow(img, cmap=plt.cm.gray)
-    plt.title(title)
-    plt.axis('off')
-    plt.show()
-    if save_path is not None:
-        plt.imsave(save_path, img, cmap = plt.cm.gray)
-    plt.close()
-
-def Gray2Rgb(img):
-    new = np.stack([img,img,img], axis=-1)
-    return new.astype(np.uint8)
-    
 def ShowImage(img, title='', figsize=(20,20)):
     plt.figure(figsize=figsize)
     plt.imshow(img.astype('uint8'))

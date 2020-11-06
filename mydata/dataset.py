@@ -1,108 +1,98 @@
 import numpy as np
-import math
-import cv2
 from PIL import Image
-from os.path import join
-from os.path import isdir
+import cv2
+import math
+import tensorflow as tf
+from functools import partialmethod
+from os.path import join, isdir
 from os import listdir
 
-try:
-    from .transforms import ToNumpy, MyCompose, MyRandomCrop
-    from .utils import Preprocess
-    
-except ImportError:
-    from transforms import ToNumpy, MyCompose, MyRandomCrop
-    from utils import Preprocess
-'''
-dataset directory structure:
---Train
-----Images
-------xxx.jpg (other format also supported)
---Val
-----Images
-------xxx.jpg
-'''
+from utils import PreprocessInput
+from utils import DepreprocessInput
+from viz import ShowImage
+
 class MyDataset(object):
+    '''
+    dataset directory structure:
+    --Train
+    ----Images
+    ------xxx.jpg (other format also supported)
+    --Val
+    ----Images
+    ------xxx.jpg
+    '''
     def __init__(self,
                  root = None,
-                 batch_size = 16,
+                 batch_size = 16, 
                  ratio = 2,  # 2x SR, 4x SR, 8x Sr, etc.
-                 num_channel = 3, # 3-channel training images
-                 shape_lr = 64, # input size of low resolution image, can be integer or a list
                  interpolation = 'cubic',
-                 debug = False,
+                 number_batch_tr = None,
+                 number_batch_val = None, 
                  ):
         
-        assert isdir(root)
-        self.debug = debug
-        self.batch_size = 1 if self.debug else batch_size
+        self.batch_size = batch_size
         self.ratio = ratio
-        self.num_channel = num_channel
+        
         assert interpolation in ['cubic', 'bilinear']
         if interpolation == 'cubic':
             self.interpolation = cv2.INTER_CUBIC
         elif interpolation == 'bilinear':
             self.interpolation = cv2.INTER_LINEAR
-        else:
-            raise ValueError('interpolation method not understood')
             
-        if isinstance(shape_lr, list):
-            assert len(shape_lr == 2)
-            self.shape_lr = tuple(shape_lr)
-        elif isinstance(shape_lr, int):
-            self.shape_lr = (shape_lr, shape_lr)
-        else:
-            raise ValueError('data type not understood')
-        
+        assert isdir(root)
         folder_tr = join(root, 'Train', 'Images')
         folder_val = join(root, 'Val', 'Images')
         self.files_tr = [join(folder_tr, name) for name in listdir(folder_tr)]
         self.files_val = [join(folder_val, name) for name in listdir(folder_val)]
-
-        self.nums_train_files = len(self.files_tr)
-        self.nums_val_files = len(self.files_val)
+        self.size_files_tr = len(self.files_tr)
+        self.size_files_val = len(self.files_val)
         
-        self.iterator_tr = self._RandomIterator(self.nums_train_files)
-        self.iterator_val = self._SequentialIterator(self.nums_val_files)
-        self.transform = self.GetDefaultTransform()
-    
-    def GetDefaultTransform(self):
-        operations = []
-        if not self.debug:
-            operations.append(MyRandomCrop(size=self.shape_lr, ratio=self.ratio))
-        operations.append(ToNumpy())
-        return MyCompose(operations)
+        self.number_batch_tr = number_batch_tr
+        self.number_batch_val = number_batch_val
         
-    def T(self, img_lr, img_hr):
-        return (img_lr, img_hr) if self.transform is None else self.transform(img_lr, img_hr)
-      
-    def Read(self, path):
-        return Image.open(path)
-    
+        self.TransTr = self.GetTransformFnTr()
+        self.TransVal = self.GetTransformFnVal()
+        
+    def GetTransformFnTr(self):
+        raise NotImplementedError
+        
+    def GetTransformFnVal(self):
+        raise NotImplementedError
+        
+    def GetShapeLow(self):
+        # get the shape of low resolution, for example, (512, 512, 3), (1024, 768, 1), ... etc
+        raise NotImplementedError
+        
+    def GetShapeHigh(self):
+        # get the shape of high resolution
+        h, w, c = self.GetShapeLow()
+        h = h * self.ratio
+        w = w * self.ratio
+        return (h, w, c)
+        
     def _MakeDividable(self, number, ratio):
-        '''
-        cut down a number so that it can be dividable by ratio
-        '''
+        # crop down an image so that its shape can be dividable by ratio
         return int(math.floor(number/ratio)*ratio)
-        
-    def GetImageHighResolution(self, path):
+    
+    def _GetImageHR(self, path):
         # read high resolution image from path
-
-        img = self.Read(path)
+        img = Image.open(path)
         # step(1): we ignore gray style images
-        if img.mode == 'L': return None # img = img.convert('RGB')
+        if img.mode == 'L': return None
         if img.mode != 'RGB': raise ValueError('image {} not recognized with mode {}'.format(path, img.mode))
         # step(2): we ignore small images which do not fit into a patch 
         w, h = img.size
-        if math.floor(h//self.ratio) < self.shape_lr[0]: return None
-        if math.floor(w//self.ratio) < self.shape_lr[1]: return None
-            
         right = self._MakeDividable(w, self.ratio)
         bottom = self._MakeDividable(h, self.ratio)
+        
+        min_h, min_w, c = self.GetShapeHigh()
+        if bottom < min_h: return None
+        if right < min_w: return None
+        
         img = img.crop((0, 0, right, bottom))
         return img
     
-    def GetImageLowResolution(self, pil_img_hr):
+    def _GetImageLR(self, pil_img_hr):
         # get low resolution image from a high resolution image (PIL Image)
         img = np.array(pil_img_hr)
         h = img.shape[0] 
@@ -117,56 +107,92 @@ class MyDataset(object):
         img_lr = Image.fromarray(img)
         return img_lr
     
-    def GetShapeHighResolution(self):
-        return tuple([ele*self.ratio for ele in self.shape_lr]) + (self.num_channel, )
-        
-    def GetShapeLowResolution(self):
-        return self.shape_lr + (self.num_channel, )
-        
-    def PreprocessHr(self, img):
-        return Preprocess(img)
-    
-    def PreprocessLr(self, img):
-        return Preprocess(img)
-        
-    def GetGenerator_Tr(self):
-        return self._GetGenerator(idx_iterator=self.iterator_tr,
-                                  files=self.files_tr
-                                  )
-    
-    def GetGenerator_Val(self):
-        return self._GetGenerator(idx_iterator=self.iterator_val, 
-                                  files=self.files_val
-                                  )
-         
     @staticmethod
-    def _RandomIterator(size):
+    def _IndexIterator(size):
         while True:
-            yield np.random.randint(low=0, high=size)
+            permutation = np.random.permutation(range(size))
+            for idx in range(size):    
+                yield permutation[idx]
             
-    @staticmethod
-    def _SequentialIterator(size):
+    def _GetGenerator(self, state):
+        assert state in ['train', 'val']
+        names = self.files_tr if state == 'train' else self.files_val
+        T = self.TransTr if state == 'train' else self.TransVal
+      
+        #iterator
+        idx_iterator = MyDataset._IndexIterator(len(names))
         while True:
-            for idx in range(size):
-                yield idx
+            while True:
+                idx = next(idx_iterator)
+                path = names[idx]
+                img_hr = self._GetImageHR(path)
+                if img_hr is not None: break
                 
-    def _GetGenerator(self, idx_iterator, files):
-        while True:
-            batch_imgs_hr = []
-            batch_imgs_lr = []
-            for _ in range(self.batch_size):
-                while True:
-                    idx = next(idx_iterator)
-                    file = files[idx]
-                    img_hr = self.GetImageHighResolution(file)
-                    if img_hr is not None: break
-                img_lr = self.GetImageLowResolution(img_hr)
-                img_lr, img_hr = self.T(img_lr, img_hr)
-                batch_imgs_hr.append(img_hr)
-                batch_imgs_lr.append(img_lr)
+            img_lr = self._GetImageLR(img_hr)
+            # T converts PIL image to ndarray image
+            img_lr, img_hr = T(img_lr, img_hr)
 
-            batch_imgs_hr = np.array(batch_imgs_hr)
-            batch_imgs_lr = np.array(batch_imgs_lr)
-            batch_imgs_hr = self.PreprocessHr(batch_imgs_hr)
-            batch_imgs_lr = self.PreprocessLr(batch_imgs_lr)
-            yield (batch_imgs_lr, batch_imgs_hr)
+            img_lr = PreprocessInput(img_lr)
+            img_hr = PreprocessInput(img_hr)
+            yield (img_lr, img_hr)
+            
+    _GetG = partialmethod(_GetGenerator)
+    
+    def _FnGenTr(self):
+        return self._GetG(state='train')
+    
+    def _FnGenVal(self):
+        return self._GetG(state='val')
+    
+    def GetDataset(self, infinite=True):
+        '''
+        if infinite is true, the virtual datasize is infinite, the dataset 
+        iterates forever. Set to True if you are using keras default training 
+        API, otherwize the iteration will run out eventually. In user-defined 
+        training process, it is convenient to set to False.
+        '''
+
+        shape_lr = self.GetShapeLow()
+        shape_hr = self.GetShapeHigh()
+        
+        shape_input = (shape_lr, shape_hr)
+        type_input = (tf.float32, tf.float32)
+        # note that the first arg is not a generator, instead, this is a function which returns a generator
+        ds_tr = tf.data.Dataset.from_generator(self._FnGenTr, type_input, shape_input)
+        ds_val = tf.data.Dataset.from_generator(self._FnGenVal, type_input, shape_input)
+        
+
+        ds_tr = ds_tr.batch(self.batch_size)
+        ds_val = ds_val.batch(self.batch_size)
+        
+        if self.number_batch_tr is None or self.number_batch_val is None:
+            infinite = True
+            
+        if not infinite:
+            # how many batches does an epoch has
+            # epoch_batch_tr = self.size_epoch_tr // self.batch_size
+            # epoch_batch_val = self.size_epoch_val // self.batch_size
+            ds_tr = ds_tr.take(self.number_batch_tr)
+            ds_val = ds_val.take(self.number_batch_val)
+            
+        # prefetch batches
+        ds_tr = ds_tr.prefetch(20)
+        ds_val = ds_val.prefetch(20)
+        
+        return ds_tr, ds_val
+    
+    def _Test(self):
+        ds_tr, ds_val = self.GetDataset()
+        for batch_lr, batch_sr in ds_tr.take(1):
+            break
+        
+        batch_lr = DepreprocessInput(batch_lr.numpy())
+        batch_sr = DepreprocessInput(batch_sr.numpy())
+        for idx in range(self.batch_size):
+            lr = batch_lr[idx, ...]
+            sr = batch_sr[idx, ...]
+            ShowImage(lr)
+            ShowImage(sr)
+        
+        
+        

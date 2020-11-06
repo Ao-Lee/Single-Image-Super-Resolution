@@ -6,12 +6,9 @@ x_np = np.expand_dims(x_np, axis=0)
 print(x_np.shape)
 print(x_np)
 x = tf.constant(x_np)
-y = tf.depth_to_space(x, block_size=2)
-with tf.Session() as sess:
-    y_np = sess.run(y)
- 
-print(y_np.shape)
-print(y_np)
+y = tf.nn.depth_to_space(x, block_size=2)
+print(x.shape)
+print(y)
 
 
 
